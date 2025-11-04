@@ -1788,7 +1788,95 @@ async function renderPdfTable() {
         console.error('Error rendering PDF table:', error);
     }
 }
+// Admin PDF Upload Function
+async function handlePdfUpload(formData) {
+    try {
+        console.log('📤 Uploading PDF...', formData);
+        
+        const response = await fetch('/api/admin/pdfs', {
+            method: 'POST',
+            body: formData
+        });
 
+        const result = await response.json();
+        
+        if (result.success) {
+            showToast('PDF uploaded successfully!');
+            // Reload PDFs
+            await loadPDFsFromDatabase();
+            // Close admin panel or reset form
+            addPdfForm.reset();
+            return true;
+        } else {
+            showToast(result.error || 'Upload failed', true);
+            return false;
+        }
+    } catch (error) {
+        console.error('Upload error:', error);
+        showToast('Upload failed: ' + error.message, true);
+        return false;
+    }
+}
+
+// Update Admin Form Submission
+addPdfForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData();
+    
+    // Get form values
+    const pdfName = document.getElementById('pdfName').value;
+    const pdfDisplayName = document.getElementById('pdfDisplayName').value;
+    const pdfType = document.getElementById('pdfType').value;
+    const pdfIcon = document.getElementById('pdfIcon').value;
+    const pdfColor = document.getElementById('pdfColor').value;
+    const pdfFile = document.getElementById('pdfFile').files[0];
+
+    // Validate file
+    if (!pdfFile) {
+        showToast('Please select a PDF file', true);
+        return;
+    }
+
+    // Add to FormData
+    formData.append('pdfFile', pdfFile);
+    formData.append('pdfName', pdfName);
+    formData.append('pdfDisplayName', pdfDisplayName);
+    formData.append('pdfType', pdfType);
+    formData.append('pdfIcon', pdfIcon);
+    formData.append('pdfColor', pdfColor);
+
+    // Show loading
+    const submitBtn = addPdfForm.querySelector('.form-submit');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+    submitBtn.disabled = true;
+
+    // Upload
+    const success = await handlePdfUpload(formData);
+
+    // Reset button
+    submitBtn.innerHTML = originalText;
+    submitBtn.disabled = false;
+
+    if (success) {
+        addPdfForm.reset();
+    }
+});
+
+// Enhanced Toast Function
+function showToast(message, isError = false) {
+    const toast = document.getElementById('toast');
+    toast.innerHTML = isError ? 
+        `<i class="fas fa-exclamation-circle"></i> ${message}` : 
+        `<i class="fas fa-check-circle"></i> ${message}`;
+    toast.className = isError ? 'toast error' : 'toast';
+    toast.style.display = 'block';
+    
+    setTimeout(() => {
+        toast.style.display = 'none';
+    }, 4000);
+}
 // Delete PDF
 async function deletePdf(id) {
     if (confirm("Are you sure you want to delete this PDF?")) {
