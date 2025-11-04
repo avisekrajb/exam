@@ -10,13 +10,14 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // MongoDB Atlas Connection
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
-  console.error('MONGODB_URI is not defined in environment variables');
+  console.error('❌ MONGODB_URI is not defined in environment variables');
+  console.log('💡 Please set MONGODB_URI in Render environment variables');
   process.exit(1);
 }
 
@@ -24,14 +25,16 @@ if (!MONGODB_URI) {
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 30000, // Increased for Render
+  serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
 })
 .then(() => {
   console.log('✅ Connected to MongoDB Atlas successfully');
+  console.log('📊 Database:', mongoose.connection.name);
 })
 .catch(err => {
   console.error('❌ MongoDB connection error:', err.message);
+  console.log('💡 Check your MONGODB_URI in Render environment variables');
   process.exit(1);
 });
 
@@ -58,21 +61,25 @@ const Visit = mongoose.model('Visit', visitSchema);
 // Multer configuration for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = 'public/uploads';
+    const uploadDir = path.join(__dirname, 'public', 'uploads');
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
     cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
-    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + '.pdf';
+    // Create unique filename
+    const originalName = path.parse(file.originalname).name;
+    const uniqueName = originalName + '-' + Date.now() + '.pdf';
     cb(null, uniqueName);
   }
 });
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
   fileFilter: function (req, file, cb) {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -82,12 +89,42 @@ const upload = multer({
   }
 });
 
-// Routes
+// ==================== ROUTES ====================
+
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    const materialCount = await PDF.countDocuments({ type: 'material' });
+    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
+    const totalPdfCount = await PDF.countDocuments();
+    const visitData = await Visit.findOne();
+    
+    res.json({
+      status: 'OK',
+      deployment: 'Render',
+      database: dbStatus,
+      pdfs: {
+        materials: materialCount,
+        important: impMaterialCount,
+        total: totalPdfCount
+      },
+      totalVisits: visitData ? visitData.count : 0,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'ERROR',
+      error: error.message 
+    });
+  }
+});
 
 // Get all PDFs
 app.get('/api/pdfs', async (req, res) => {
   try {
     const pdfs = await PDF.find().sort({ dateAdded: -1 });
+    console.log(`📚 Serving ${pdfs.length} PDFs`);
     res.json(pdfs);
   } catch (error) {
     console.error('Error fetching PDFs:', error);
@@ -106,8 +143,26 @@ app.get('/api/pdfs/:type', async (req, res) => {
   }
 });
 
+// Get PDF counts
+app.get('/api/stats/counts', async (req, res) => {
+  try {
+    const materialCount = await PDF.countDocuments({ type: 'material' });
+    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
+    const totalCount = await PDF.countDocuments();
+    
+    res.json({
+      materialCount,
+      impMaterialCount,
+      totalCount
+    });
+  } catch (error) {
+    console.error('Error getting counts:', error);
+    res.status(500).json({ error: 'Failed to get counts' });
+  }
+});
+
 // Serve PDF files
-app.get('/uploads/:filename', async (req, res) => {
+app.get('/uploads/:filename', (req, res) => {
   try {
     const filename = req.params.filename;
     const filePath = path.join(__dirname, 'public', 'uploads', filename);
@@ -128,15 +183,20 @@ app.get('/uploads/:filename', async (req, res) => {
 // Admin: Add new PDF
 app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
   try {
+    console.log('📤 Admin uploading PDF...');
+    
     if (!req.file) {
       return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
     const { displayName, type, icon, color } = req.body;
     
+    // Validate required fields
     if (!displayName || !type || !icon) {
-      if (req.file) fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Missing required fields' });
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ error: 'Missing required fields: displayName, type, icon' });
     }
 
     const newPdf = new PDF({
@@ -150,6 +210,7 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
     });
     
     const savedPdf = await newPdf.save();
+    console.log(`✅ PDF added: "${savedPdf.displayName}"`);
     
     res.status(201).json({
       success: true,
@@ -158,11 +219,17 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error adding PDF:', error);
+    console.error('❌ Error adding PDF:', error);
+    
+    // Delete uploaded file if there was an error
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    res.status(500).json({ error: 'Failed to add PDF' });
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to add PDF: ' + error.message 
+    });
   }
 });
 
@@ -175,72 +242,154 @@ app.delete('/api/admin/pdfs/:id', async (req, res) => {
       return res.status(404).json({ error: 'PDF not found' });
     }
 
+    // Delete the file from the server
     const filePath = path.join(__dirname, 'public', pdf.path);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
+      console.log(`🗑️ Deleted file: ${pdf.filename}`);
     }
 
     await PDF.findByIdAndDelete(req.params.id);
+    console.log(`✅ PDF deleted: "${pdf.displayName}"`);
     
-    res.json({ message: 'PDF deleted successfully' });
+    res.json({ 
+      success: true,
+      message: 'PDF deleted successfully' 
+    });
   } catch (error) {
     console.error('Error deleting PDF:', error);
     res.status(500).json({ error: 'Failed to delete PDF' });
   }
 });
 
-// Get counts
-app.get('/api/stats/counts', async (req, res) => {
+// Visit tracking
+app.get('/api/visits', async (req, res) => {
   try {
-    const materialCount = await PDF.countDocuments({ type: 'material' });
-    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
-    const totalCount = await PDF.countDocuments();
+    let visitData = await Visit.findOne();
     
-    res.json({
-      materialCount,
-      impMaterialCount,
-      totalCount
-    });
+    if (!visitData) {
+      visitData = new Visit({ count: 0 });
+      await visitData.save();
+    }
+    
+    res.json({ count: visitData.count });
   } catch (error) {
-    console.error('Error getting counts:', error);
-    res.status(500).json({ error: 'Failed to get counts' });
+    console.error('Error fetching visits:', error);
+    res.status(500).json({ error: 'Failed to fetch visit count' });
   }
 });
 
-// Health check
-app.get('/api/health', async (req, res) => {
+app.post('/api/visits/increment', async (req, res) => {
   try {
-    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-    const materialCount = await PDF.countDocuments({ type: 'material' });
-    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
-    const totalPdfCount = await PDF.countDocuments();
+    let visitData = await Visit.findOne();
     
-    res.json({
-      status: 'OK',
-      database: dbStatus,
-      pdfs: {
-        materials: materialCount,
-        important: impMaterialCount,
-        total: totalPdfCount
+    if (!visitData) {
+      visitData = new Visit({ count: 1 });
+    } else {
+      visitData.count += 1;
+      visitData.lastUpdated = new Date();
+    }
+    
+    await visitData.save();
+    res.json({ count: visitData.count });
+  } catch (error) {
+    console.error('Error incrementing visits:', error);
+    res.status(500).json({ error: 'Failed to increment visit count' });
+  }
+});
+
+// Initialize sample data (optional)
+app.post('/api/init-sample', async (req, res) => {
+  try {
+    const samplePDFs = [
+      {
+        name: "bct.pdf",
+        displayName: "Basic Computer Technology",
+        filename: "sample-bct.pdf",
+        path: "/uploads/sample-bct.pdf",
+        type: "material",
+        icon: "fa-laptop-code",
+        color: "#6a11cb"
+      },
+      {
+        name: "cloud-computing.pdf",
+        displayName: "Cloud Computing Fundamentals", 
+        filename: "sample-cc.pdf",
+        path: "/uploads/sample-cc.pdf",
+        type: "material",
+        icon: "fa-cloud",
+        color: "#1abc9c"
       }
+    ];
+
+    // Clear existing and insert sample data
+    await PDF.deleteMany({});
+    const result = await PDF.insertMany(samplePDFs);
+    
+    res.json({
+      success: true,
+      message: `Added ${result.length} sample PDFs`,
+      pdfs: result
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error initializing sample data:', error);
+    res.status(500).json({ error: 'Failed to initialize sample data' });
   }
 });
 
-// Serve main page
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// ==================== CLIENT ROUTING ====================
 
-// Serve all other routes to index.html (for React Router compatibility)
+// Serve index.html for all other routes (React Router compatibility)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// ==================== ERROR HANDLING ====================
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 10MB.' });
+    }
+  }
+  
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Handle 404 for API routes
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ error: 'API endpoint not found' });
+});
+
+// ==================== SERVER START ====================
+
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Study Materials Portal running on port ${PORT}`);
-  console.log(`✅ Ready for deployment on Render`);
+  console.log('='.repeat(50));
+  console.log('🚀 STUDY MATERIALS PORTAL - RENDER DEPLOYMENT');
+  console.log('='.repeat(50));
+  console.log(`✅ Server running on port: ${PORT}`);
+  console.log(`🌐 App URL: https://your-app.onrender.com`);
+  console.log(`🔍 Health check: /api/health`);
+  console.log(`📊 API Status: /api/stats/counts`);
+  console.log(`📚 PDF API: /api/pdfs`);
+  console.log('='.repeat(50));
+  console.log('✅ Ready for production on Render!');
+});
+
+// Graceful shutdown for Render
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed.');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Render shutdown signal received...');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed.');
+  process.exit(0);
 });
