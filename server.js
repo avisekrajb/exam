@@ -21,12 +21,16 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
+console.log('🔗 Attempting MongoDB connection...');
+
 // MongoDB connection with Render optimization
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS: 45000,
+  serverSelectionTimeoutMS: 30000, // 30 seconds
+  socketTimeoutMS: 45000, // 45 seconds
+  bufferCommands: false,
+  maxPoolSize: 10,
 })
 .then(() => {
   console.log('✅ Connected to MongoDB Atlas successfully');
@@ -34,8 +38,23 @@ mongoose.connect(MONGODB_URI, {
 })
 .catch(err => {
   console.error('❌ MongoDB connection error:', err.message);
-  console.log('💡 Check your MONGODB_URI in Render environment variables');
-  process.exit(1);
+  console.log('💡 Please check:');
+  console.log('1. Network Access in MongoDB Atlas - Add 0.0.0.0/0');
+  console.log('2. Database user credentials are correct');
+  console.log('3. Connection string format is valid');
+});
+
+// MongoDB connection events
+mongoose.connection.on('connected', () => {
+  console.log('🎉 MongoDB connected - App is ready!');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️ MongoDB disconnected');
 });
 
 // MongoDB Schemas
@@ -68,7 +87,6 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
-    // Create unique filename
     const originalName = path.parse(file.originalname).name;
     const uniqueName = originalName + '-' + Date.now() + '.pdf';
     cb(null, uniqueName);
@@ -93,35 +111,51 @@ const upload = multer({
 
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
+  const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  
   try {
-    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-    const materialCount = await PDF.countDocuments({ type: 'material' });
-    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
-    const totalPdfCount = await PDF.countDocuments();
-    const visitData = await Visit.findOne();
-    
-    res.json({
-      status: 'OK',
-      deployment: 'Render',
-      database: dbStatus,
-      pdfs: {
-        materials: materialCount,
-        important: impMaterialCount,
-        total: totalPdfCount
-      },
-      totalVisits: visitData ? visitData.count : 0,
-      timestamp: new Date().toISOString()
-    });
+    if (dbStatus === 'connected') {
+      const materialCount = await PDF.countDocuments({ type: 'material' });
+      const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
+      const totalPdfCount = await PDF.countDocuments();
+      const visitData = await Visit.findOne();
+      
+      res.json({
+        status: 'OK',
+        deployment: 'Render',
+        database: dbStatus,
+        pdfs: {
+          materials: materialCount,
+          important: impMaterialCount,
+          total: totalPdfCount
+        },
+        totalVisits: visitData ? visitData.count : 0,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.json({
+        status: 'ERROR',
+        database: 'disconnected',
+        message: 'MongoDB not connected. Check network access in Atlas.',
+        timestamp: new Date().toISOString()
+      });
+    }
   } catch (error) {
-    res.status(500).json({ 
+    res.json({
       status: 'ERROR',
-      error: error.message 
+      database: dbStatus,
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
 
 // Get all PDFs
 app.get('/api/pdfs', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     const pdfs = await PDF.find().sort({ dateAdded: -1 });
     console.log(`📚 Serving ${pdfs.length} PDFs`);
@@ -134,6 +168,10 @@ app.get('/api/pdfs', async (req, res) => {
 
 // Get PDFs by type
 app.get('/api/pdfs/:type', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     const pdfs = await PDF.find({ type: req.params.type }).sort({ dateAdded: -1 });
     res.json(pdfs);
@@ -145,6 +183,10 @@ app.get('/api/pdfs/:type', async (req, res) => {
 
 // Get PDF counts
 app.get('/api/stats/counts', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     const materialCount = await PDF.countDocuments({ type: 'material' });
     const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
@@ -182,6 +224,10 @@ app.get('/uploads/:filename', (req, res) => {
 
 // Admin: Add new PDF
 app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     console.log('📤 Admin uploading PDF...');
     
@@ -235,6 +281,10 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
 
 // Admin: Delete PDF
 app.delete('/api/admin/pdfs/:id', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     const pdf = await PDF.findById(req.params.id);
     
@@ -264,6 +314,10 @@ app.delete('/api/admin/pdfs/:id', async (req, res) => {
 
 // Visit tracking
 app.get('/api/visits', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     let visitData = await Visit.findOne();
     
@@ -280,6 +334,10 @@ app.get('/api/visits', async (req, res) => {
 });
 
 app.post('/api/visits/increment', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     let visitData = await Visit.findOne();
     
@@ -298,8 +356,12 @@ app.post('/api/visits/increment', async (req, res) => {
   }
 });
 
-// Initialize sample data (optional)
+// Initialize sample data
 app.post('/api/init-sample', async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(500).json({ error: 'Database not connected' });
+  }
+  
   try {
     const samplePDFs = [
       {
@@ -339,7 +401,7 @@ app.post('/api/init-sample', async (req, res) => {
 
 // ==================== CLIENT ROUTING ====================
 
-// Serve index.html for all other routes (React Router compatibility)
+// Serve index.html for all other routes
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -367,16 +429,19 @@ app.use('/api/*', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log('='.repeat(50));
+  console.log('='.repeat(60));
   console.log('🚀 STUDY MATERIALS PORTAL - RENDER DEPLOYMENT');
-  console.log('='.repeat(50));
+  console.log('='.repeat(60));
   console.log(`✅ Server running on port: ${PORT}`);
-  console.log(`🌐 App URL: https://your-app.onrender.com`);
+  console.log(`🌐 App URL: https://exam-k35t.onrender.com`);
   console.log(`🔍 Health check: /api/health`);
   console.log(`📊 API Status: /api/stats/counts`);
   console.log(`📚 PDF API: /api/pdfs`);
-  console.log('='.repeat(50));
-  console.log('✅ Ready for production on Render!');
+  console.log('='.repeat(60));
+  console.log('🔄 Waiting for MongoDB connection...');
+  console.log('💡 If connection fails, check Network Access in MongoDB Atlas');
+  console.log('💡 Add 0.0.0.0/0 to allow Render IP addresses');
+  console.log('='.repeat(60));
 });
 
 // Graceful shutdown for Render
