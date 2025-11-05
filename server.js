@@ -13,456 +13,469 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ==================== DATABASE SETUP ====================
+// MongoDB Atlas Connection
+const MONGODB_URI = process.env.MONGODB_URI;
 
-// Fallback database file (if MongoDB fails)
-const FALLBACK_DB_FILE = 'fallback-database.json';
+if (!MONGODB_URI) {
+  console.error('❌ MONGODB_URI is not defined in environment variables');
+  console.log('💡 Please set MONGODB_URI in Render environment variables');
+  process.exit(1);
+}
 
-// Initialize fallback database
-const initializeFallbackDB = () => {
-    if (!fs.existsSync(FALLBACK_DB_FILE)) {
-        const initialData = {
-            pdfs: [],
-            visits: 0,
-            lastUpdated: new Date().toISOString()
-        };
-        fs.writeFileSync(FALLBACK_DB_FILE, JSON.stringify(initialData, null, 2));
-        console.log('📁 Fallback database initialized');
-    }
-};
+console.log('🔗 Attempting MongoDB connection...');
 
-// Read fallback database
-const readFallbackDB = () => {
-    initializeFallbackDB();
-    try {
-        return JSON.parse(fs.readFileSync(FALLBACK_DB_FILE, 'utf8'));
-    } catch (error) {
-        console.error('Error reading fallback DB:', error);
-        return { pdfs: [], visits: 0 };
-    }
-};
-
-// Write to fallback database
-const writeFallbackDB = (data) => {
-    try {
-        data.lastUpdated = new Date().toISOString();
-        fs.writeFileSync(FALLBACK_DB_FILE, JSON.stringify(data, null, 2));
-        return true;
-    } catch (error) {
-        console.error('Error writing fallback DB:', error);
-        return false;
-    }
-};
-
-// Sync fallback data to MongoDB when available
-const syncToMongoDB = async (fallbackData) => {
-    if (mongoose.connection.readyState === 1 && fallbackData.pdfs.length > 0) {
-        try {
-            console.log('🔄 Syncing fallback data to MongoDB...');
-            await PDF.deleteMany({});
-            const mongoPdfs = fallbackData.pdfs.map(pdf => ({
-                ...pdf,
-                _id: pdf.id // Use the same ID
-            }));
-            await PDF.insertMany(mongoPdfs);
-            console.log(`✅ Synced ${mongoPdfs.length} PDFs to MongoDB`);
-            
-            // Clear fallback after successful sync
-            writeFallbackDB({ pdfs: [], visits: fallbackData.visits, lastUpdated: new Date().toISOString() });
-        } catch (error) {
-            console.error('❌ Sync to MongoDB failed:', error);
-        }
-    }
-};
-
-// ==================== MONGODB SETUP ====================
-
-let isMongoConnected = false;
+// MongoDB connection with optimized settings
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS: 45000,
+})
+.then(() => {
+  console.log('✅ Connected to MongoDB Atlas successfully');
+  console.log('📊 Database:', mongoose.connection.name);
+})
+.catch(err => {
+  console.error('❌ MongoDB connection error:', err.message);
+  console.log('💡 Please check:');
+  console.log('1. Network Access in MongoDB Atlas (add 0.0.0.0/0)');
+  console.log('2. Database user credentials');
+  console.log('3. Connection string format');
+});
 
 // MongoDB Schemas
 const pdfSchema = new mongoose.Schema({
-    name: String,
-    displayName: String,
-    filename: String,
-    path: String,
-    type: String,
-    icon: String,
-    color: { type: String, default: '#6a11cb' },
-    dateAdded: { type: Date, default: Date.now }
-}, { _id: true });
+  name: { type: String, required: true },
+  displayName: { type: String, required: true },
+  filename: { type: String, required: true },
+  path: { type: String, required: true },
+  type: { type: String, required: true, enum: ['material', 'imp-material'] },
+  icon: { type: String, required: true },
+  color: { type: String, default: '#6a11cb' },
+  dateAdded: { type: Date, default: Date.now }
+});
 
 const visitSchema = new mongoose.Schema({
-    count: { type: Number, default: 0 },
-    lastUpdated: { type: Date, default: Date.now }
+  count: { type: Number, default: 0 },
+  lastUpdated: { type: Date, default: Date.now }
 });
 
 const PDF = mongoose.model('PDF', pdfSchema);
 const Visit = mongoose.model('Visit', visitSchema);
 
-// MongoDB Connection with Auto-Retry
-const connectMongoDB = async () => {
-    const MONGODB_URI = process.env.MONGODB_URI;
-    
-    if (!MONGODB_URI) {
-        console.log('❌ MONGODB_URI not found, using fallback database');
-        return false;
-    }
-
-    try {
-        await mongoose.connect(MONGODB_URI, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-            serverSelectionTimeoutMS: 5000,
-            bufferCommands: false,
-        });
-        
-        isMongoConnected = true;
-        console.log('✅ MongoDB Connected Successfully');
-        
-        // Sync fallback data to MongoDB
-        const fallbackData = readFallbackDB();
-        if (fallbackData.pdfs.length > 0) {
-            await syncToMongoDB(fallbackData);
-        }
-        
-        return true;
-    } catch (error) {
-        console.log('❌ MongoDB Connection Failed, using fallback database');
-        isMongoConnected = false;
-        return false;
-    }
-};
-
-// Initialize database connection
-connectMongoDB();
-
-// ==================== DATA ACCESS LAYER ====================
-
-// Unified function to get PDFs (tries MongoDB first, then fallback)
-const getPDFs = async (type = null) => {
-    if (isMongoConnected) {
-        try {
-            let query = {};
-            if (type) query.type = type;
-            const pdfs = await PDF.find(query).sort({ dateAdded: -1 });
-            return pdfs;
-        } catch (error) {
-            console.error('MongoDB query failed, using fallback:', error);
-            isMongoConnected = false;
-        }
-    }
-    
-    // Use fallback database
-    const fallbackData = readFallbackDB();
-    let pdfs = fallbackData.pdfs;
-    if (type) {
-        pdfs = pdfs.filter(pdf => pdf.type === type);
-    }
-    return pdfs.sort((a, b) => new Date(b.dateAdded) - new Date(a.dateAdded));
-};
-
-// Unified function to get counts
-const getCounts = async () => {
-    if (isMongoConnected) {
-        try {
-            const materialCount = await PDF.countDocuments({ type: 'material' });
-            const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
-            return { materialCount, impMaterialCount, totalCount: materialCount + impMaterialCount };
-        } catch (error) {
-            console.error('MongoDB count failed, using fallback:', error);
-            isMongoConnected = false;
-        }
-    }
-    
-    // Use fallback database
-    const fallbackData = readFallbackDB();
-    const materialCount = fallbackData.pdfs.filter(pdf => pdf.type === 'material').length;
-    const impMaterialCount = fallbackData.pdfs.filter(pdf => pdf.type === 'imp-material').length;
-    return { materialCount, impMaterialCount, totalCount: materialCount + impMaterialCount };
-};
-
-// Unified function to add PDF
-const addPDF = async (pdfData) => {
-    // Always save to fallback first for immediate persistence
-    const fallbackData = readFallbackDB();
-    const newPdf = {
-        id: Date.now().toString(),
-        ...pdfData,
-        dateAdded: new Date().toISOString()
-    };
-    
-    fallbackData.pdfs.push(newPdf);
-    writeFallbackDB(fallbackData);
-    console.log('✅ PDF saved to fallback database');
-
-    // Try to save to MongoDB if available
-    if (isMongoConnected) {
-        try {
-            const mongoPdf = new PDF({
-                _id: newPdf.id,
-                ...pdfData
-            });
-            await mongoPdf.save();
-            console.log('✅ PDF also saved to MongoDB');
-        } catch (error) {
-            console.error('❌ MongoDB save failed, but PDF is safe in fallback');
-        }
-    }
-    
-    return newPdf;
-};
-
-// Unified function to delete PDF
-const deletePDF = async (pdfId) => {
-    // Delete from fallback
-    const fallbackData = readFallbackDB();
-    const pdfIndex = fallbackData.pdfs.findIndex(pdf => pdf.id === pdfId);
-    
-    if (pdfIndex !== -1) {
-        const pdf = fallbackData.pdfs[pdfIndex];
-        
-        // Delete file from server
-        const filePath = path.join(__dirname, 'public', pdf.path);
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
-        
-        fallbackData.pdfs.splice(pdfIndex, 1);
-        writeFallbackDB(fallbackData);
-        console.log('✅ PDF deleted from fallback database');
-    }
-
-    // Try to delete from MongoDB if available
-    if (isMongoConnected) {
-        try {
-            await PDF.findByIdAndDelete(pdfId);
-            console.log('✅ PDF also deleted from MongoDB');
-        } catch (error) {
-            console.error('❌ MongoDB delete failed, but PDF removed from fallback');
-        }
-    }
-};
-
-// ==================== MULTER SETUP ====================
-
+// Multer configuration for file uploads
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        const uploadDir = path.join(__dirname, 'public', 'uploads');
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-        }
-        cb(null, uploadDir);
-    },
-    filename: function (req, file, cb) {
-        const uniqueName = Date.now() + '-' + Math.random().toString(36).substring(7) + '-' + file.originalname;
-        cb(null, uniqueName);
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'public', 'uploads');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
     }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Create unique filename
+    const originalName = path.parse(file.originalname).name;
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const uniqueName = originalName + '-' + uniqueSuffix + '.pdf';
+    cb(null, uniqueName);
+  }
 });
 
 const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 }
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: function (req, file, cb) {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed!'), false);
+    }
+  }
 });
 
 // ==================== ROUTES ====================
 
-// Health check with database status
+// Health check endpoint
 app.get('/api/health', async (req, res) => {
-    const counts = await getCounts();
-    const fallbackData = readFallbackDB();
-    
+  try {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    let materialCount = 0;
+    let impMaterialCount = 0;
+    let totalPdfCount = 0;
+    let visitCount = 0;
+
+    if (dbStatus === 'connected') {
+      materialCount = await PDF.countDocuments({ type: 'material' });
+      impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
+      totalPdfCount = await PDF.countDocuments();
+      
+      const visitData = await Visit.findOne();
+      visitCount = visitData ? visitData.count : 0;
+    }
+
     res.json({
-        status: 'OK',
-        database: {
-            mongodb: isMongoConnected ? 'connected' : 'disconnected',
-            fallback: 'active'
-        },
-        data: {
-            pdfs: counts.totalCount,
-            materials: counts.materialCount,
-            important: counts.impMaterialCount,
-            fallbackPdfs: fallbackData.pdfs.length,
-            lastUpdated: fallbackData.lastUpdated
-        },
-        server: {
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-            timestamp: new Date().toISOString()
-        }
+      status: 'OK',
+      deployment: 'Render',
+      database: dbStatus,
+      pdfs: {
+        materials: materialCount,
+        important: impMaterialCount,
+        total: totalPdfCount
+      },
+      totalVisits: visitCount,
+      timestamp: new Date().toISOString()
     });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'ERROR',
+      error: error.message 
+    });
+  }
 });
 
 // Get all PDFs
 app.get('/api/pdfs', async (req, res) => {
-    try {
-        const pdfs = await getPDFs();
-        res.json(pdfs);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch PDFs' });
-    }
+  try {
+    const pdfs = await PDF.find().sort({ dateAdded: -1 });
+    console.log(`📚 Serving ${pdfs.length} PDFs`);
+    res.json(pdfs);
+  } catch (error) {
+    console.error('Error fetching PDFs:', error);
+    res.status(500).json({ error: 'Failed to fetch PDFs' });
+  }
 });
 
 // Get PDFs by type
 app.get('/api/pdfs/:type', async (req, res) => {
-    try {
-        const pdfs = await getPDFs(req.params.type);
-        res.json(pdfs);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch PDFs' });
-    }
+  try {
+    const pdfs = await PDF.find({ type: req.params.type }).sort({ dateAdded: -1 });
+    res.json(pdfs);
+  } catch (error) {
+    console.error('Error fetching PDFs by type:', error);
+    res.status(500).json({ error: 'Failed to fetch PDFs' });
+  }
 });
 
-// Get counts
+// Get PDF counts
 app.get('/api/stats/counts', async (req, res) => {
-    try {
-        const counts = await getCounts();
-        res.json(counts);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to get counts' });
-    }
+  try {
+    const materialCount = await PDF.countDocuments({ type: 'material' });
+    const impMaterialCount = await PDF.countDocuments({ type: 'imp-material' });
+    const totalCount = await PDF.countDocuments();
+    
+    res.json({
+      materialCount,
+      impMaterialCount,
+      totalCount
+    });
+  } catch (error) {
+    console.error('Error getting counts:', error);
+    res.status(500).json({ error: 'Failed to get counts' });
+  }
 });
 
-// Admin: Add PDF
-app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
-    try {
-        console.log('📤 PDF Upload Request Received');
-        
-        if (!req.file) {
-            return res.status(400).json({ success: false, error: 'No file uploaded' });
-        }
-
-        const { pdfName, pdfDisplayName, pdfType, pdfIcon, pdfColor } = req.body;
-
-        if (!pdfDisplayName || !pdfType || !pdfIcon) {
-            if (req.file) fs.unlinkSync(req.file.path);
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Missing required fields' 
-            });
-        }
-
-        const pdfData = {
-            name: pdfName || req.file.originalname,
-            displayName: pdfDisplayName,
-            filename: req.file.filename,
-            path: `/uploads/${req.file.filename}`,
-            type: pdfType,
-            icon: pdfIcon,
-            color: pdfColor || '#6a11cb'
-        };
-
-        const savedPdf = await addPDF(pdfData);
-
-        res.json({
-            success: true,
-            message: 'PDF uploaded successfully!',
-            pdf: savedPdf,
-            database: isMongoConnected ? 'mongodb+fallback' : 'fallback'
-        });
-
-    } catch (error) {
-        console.error('❌ PDF Upload Error:', error);
-        if (req.file && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
-        res.status(500).json({ 
-            success: false, 
-            error: 'Upload failed' 
-        });
+// Serve PDF files
+app.get('/uploads/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const filePath = path.join(__dirname, 'public', 'uploads', filename);
+    
+    if (fs.existsSync(filePath)) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+      res.sendFile(filePath);
+    } else {
+      res.status(404).json({ error: 'PDF file not found' });
     }
+  } catch (error) {
+    console.error('Error serving PDF file:', error);
+    res.status(500).json({ error: 'Failed to serve PDF file' });
+  }
+});
+
+// Admin: Add new PDF
+app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
+  try {
+    console.log('📤 Admin uploading PDF...');
+    console.log('File:', req.file);
+    console.log('Body:', req.body);
+    
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No PDF file uploaded' });
+    }
+
+    const { pdfName, pdfDisplayName, pdfType, pdfIcon, pdfColor } = req.body;
+
+    // Validate required fields
+    if (!pdfDisplayName || !pdfType || !pdfIcon) {
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: Display Name, Type, and Icon are required' 
+      });
+    }
+
+    const newPdf = new PDF({
+      name: pdfName || req.file.originalname,
+      displayName: pdfDisplayName,
+      filename: req.file.filename,
+      path: `/uploads/${req.file.filename}`,
+      type: pdfType,
+      icon: pdfIcon,
+      color: pdfColor || '#6a11cb'
+    });
+    
+    const savedPdf = await newPdf.save();
+    console.log(`✅ PDF added to MongoDB: "${savedPdf.displayName}"`);
+    
+    res.status(201).json({
+      success: true,
+      message: 'PDF added successfully!',
+      pdf: savedPdf
+    });
+    
+  } catch (error) {
+    console.error('❌ Error adding PDF to MongoDB:', error);
+    
+    // Delete uploaded file if there was an error
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to add PDF: ' + error.message 
+    });
+  }
 });
 
 // Admin: Delete PDF
 app.delete('/api/admin/pdfs/:id', async (req, res) => {
-    try {
-        await deletePDF(req.params.id);
-        res.json({ 
-            success: true, 
-            message: 'PDF deleted successfully',
-            database: isMongoConnected ? 'mongodb+fallback' : 'fallback'
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Delete failed' });
+  try {
+    const pdf = await PDF.findById(req.params.id);
+    
+    if (!pdf) {
+      return res.status(404).json({ error: 'PDF not found' });
     }
+
+    // Delete the file from the server
+    const filePath = path.join(__dirname, 'public', pdf.path);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      console.log(`🗑️ Deleted file: ${pdf.filename}`);
+    }
+
+    await PDF.findByIdAndDelete(req.params.id);
+    console.log(`✅ PDF deleted from MongoDB: "${pdf.displayName}"`);
+    
+    res.json({ 
+      success: true,
+      message: 'PDF deleted successfully' 
+    });
+  } catch (error) {
+    console.error('Error deleting PDF:', error);
+    res.status(500).json({ error: 'Failed to delete PDF' });
+  }
 });
 
-// Serve uploaded files
-app.get('/uploads/:filename', (req, res) => {
-    const filePath = path.join(__dirname, 'public', 'uploads', req.params.filename);
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-    } else {
-        res.status(404).json({ error: 'File not found' });
+// Visit tracking
+app.get('/api/visits', async (req, res) => {
+  try {
+    let visitData = await Visit.findOne();
+    
+    if (!visitData) {
+      visitData = new Visit({ count: 0 });
+      await visitData.save();
     }
+    
+    res.json({ count: visitData.count });
+  } catch (error) {
+    console.error('Error fetching visits:', error);
+    res.status(500).json({ error: 'Failed to fetch visit count' });
+  }
+});
+
+app.post('/api/visits/increment', async (req, res) => {
+  try {
+    let visitData = await Visit.findOne();
+    
+    if (!visitData) {
+      visitData = new Visit({ count: 1 });
+    } else {
+      visitData.count += 1;
+      visitData.lastUpdated = new Date();
+    }
+    
+    await visitData.save();
+    res.json({ count: visitData.count });
+  } catch (error) {
+    console.error('Error incrementing visits:', error);
+    res.status(500).json({ error: 'Failed to increment visit count' });
+  }
+});
+
+// Initialize sample data
+app.post('/api/init-sample', async (req, res) => {
+  try {
+    const samplePDFs = [
+      {
+        name: "basic-computer-technology.pdf",
+        displayName: "Basic Computer Technology",
+        filename: "sample-bct.pdf",
+        path: "/uploads/sample-bct.pdf",
+        type: "material",
+        icon: "fa-laptop-code",
+        color: "#6a11cb"
+      },
+      {
+        name: "cloud-computing-fundamentals.pdf",
+        displayName: "Cloud Computing Fundamentals", 
+        filename: "sample-cc.pdf",
+        path: "/uploads/sample-cc.pdf",
+        type: "material",
+        icon: "fa-cloud",
+        color: "#1abc9c"
+      },
+      {
+        name: "important-questions-cloud.pdf",
+        displayName: "Important Questions - Cloud Computing",
+        filename: "sample-imp-cc.pdf",
+        path: "/uploads/sample-imp-cc.pdf",
+        type: "imp-material",
+        icon: "fa-cloud",
+        color: "#2575fc"
+      }
+    ];
+
+    // Clear existing and insert sample data
+    await PDF.deleteMany({});
+    const result = await PDF.insertMany(samplePDFs);
+    
+    res.json({
+      success: true,
+      message: `Added ${result.length} sample PDFs`,
+      pdfs: result
+    });
+  } catch (error) {
+    console.error('Error initializing sample data:', error);
+    res.status(500).json({ error: 'Failed to initialize sample data' });
+  }
 });
 
 // Database status endpoint
-app.get('/api/database/status', (req, res) => {
-    const fallbackData = readFallbackDB();
+app.get('/api/database/status', async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    const pdfCount = await PDF.countDocuments();
+    const visitData = await Visit.findOne();
+    
     res.json({
-        mongodb: isMongoConnected ? 'connected' : 'disconnected',
-        fallback: {
-            pdfs: fallbackData.pdfs.length,
-            visits: fallbackData.visits,
-            lastUpdated: fallbackData.lastUpdated
-        },
-        sync: {
-            status: isMongoConnected ? 'active' : 'standalone',
-            retry: 'automatic'
-        }
+      mongodb: dbStatus,
+      statistics: {
+        pdfs: pdfCount,
+        visits: visitData ? visitData.count : 0,
+        lastUpdated: visitData ? visitData.lastUpdated : new Date()
+      },
+      connection: {
+        host: mongoose.connection.host,
+        name: mongoose.connection.name,
+        readyState: mongoose.connection.readyState
+      }
     });
+  } catch (error) {
+    res.json({
+      mongodb: 'error',
+      error: error.message
+    });
+  }
 });
 
 // Force MongoDB reconnection
 app.post('/api/database/reconnect', async (req, res) => {
-    const result = await connectMongoDB();
-    res.json({
-        success: result,
-        message: result ? 'MongoDB reconnected successfully' : 'MongoDB connection failed',
-        connected: isMongoConnected
+  try {
+    await mongoose.disconnect();
+    await mongoose.connect(MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
     });
+    
+    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    
+    res.json({
+      success: dbStatus === 'connected',
+      message: dbStatus === 'connected' ? 'MongoDB reconnected successfully' : 'MongoDB reconnection failed',
+      connected: dbStatus === 'connected'
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      message: 'Reconnection failed: ' + error.message,
+      connected: false
+    });
+  }
 });
 
-// Serve frontend
+// ==================== ERROR HANDLING ====================
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 10MB.' });
+    }
+  }
+  
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Handle 404 for API routes
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ error: 'API endpoint not found' });
+});
+
+// ==================== CLIENT ROUTING ====================
+
+// Serve index.html for all other routes (React Router compatibility)
 app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ==================== SERVER START ====================
 
-// Initialize fallback database on startup
-initializeFallbackDB();
-
-// Periodic MongoDB reconnection attempt
-setInterval(async () => {
-    if (!isMongoConnected && process.env.MONGODB_URI) {
-        console.log('🔄 Attempting MongoDB reconnection...');
-        await connectMongoDB();
-    }
-}, 30000); // Try every 30 seconds
-
 // Start server
 app.listen(PORT, () => {
-    console.log('='.repeat(60));
-    console.log('🚀 STUDY PORTAL - PERSISTENT DATABASE SYSTEM');
-    console.log('='.repeat(60));
-    console.log(`✅ Server running on port: ${PORT}`);
-    console.log(`🌐 App URL: https://exam-k35t.onrender.com`);
-    console.log(`📊 Database: ${isMongoConnected ? 'MongoDB + Fallback' : 'Fallback Only'}`);
-    console.log(`💾 Data Persistence: GUARANTEED`);
-    console.log(`🔄 Auto-sync: ${isMongoConnected ? 'ACTIVE' : 'STANDBY'}`);
-    console.log('='.repeat(60));
-    console.log('✅ Data survives server restarts!');
-    console.log('✅ PDFs persist even if MongoDB fails!');
-    console.log('✅ Automatic database synchronization!');
-    console.log('='.repeat(60));
+  console.log('='.repeat(60));
+  console.log('🚀 STUDY MATERIALS PORTAL - MONGODB ATLAS');
+  console.log('='.repeat(60));
+  console.log(`✅ Server running on port: ${PORT}`);
+  console.log(`🌐 App URL: https://exam-k35t.onrender.com`);
+  console.log(`🔍 Health check: /api/health`);
+  console.log(`📊 API Status: /api/stats/counts`);
+  console.log(`📚 PDF API: /api/pdfs`);
+  console.log(`👨‍💼 Admin API: /api/admin/pdfs`);
+  console.log('='.repeat(60));
+  console.log('✅ MongoDB Atlas Integration Active');
+  console.log('✅ File Upload System Ready');
+  console.log('✅ Admin Panel Functional');
+  console.log('='.repeat(60));
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    console.log('\n🛑 Shutting down gracefully...');
-    if (isMongoConnected) {
-        await mongoose.connection.close();
-    }
-    process.exit(0);
+  console.log('\n🛑 Shutting down gracefully...');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed.');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Render shutdown signal received...');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed.');
+  process.exit(0);
 });
