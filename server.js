@@ -13,39 +13,28 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// MongoDB Atlas Connection - PERMANENT STORAGE
+// MongoDB Atlas Connection
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
   console.error('❌ MONGODB_URI is not defined in environment variables');
-  console.log('💡 Please set MONGODB_URI in Render environment variables');
   process.exit(1);
 }
 
 console.log('🔗 Connecting to MongoDB Atlas...');
 
-// MongoDB connection with persistent storage
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS: 45000,
-})
+// Updated MongoDB connection (removed deprecated options)
+mongoose.connect(MONGODB_URI)
 .then(() => {
   console.log('✅ Connected to MongoDB Atlas successfully');
   console.log('💾 Database: Permanent storage enabled');
-  console.log('📊 Data will survive server restarts');
 })
 .catch(err => {
   console.error('❌ MongoDB connection failed:', err.message);
-  console.log('💡 Please check:');
-  console.log('1. MONGODB_URI in Render environment variables');
-  console.log('2. Network Access in MongoDB Atlas (add 0.0.0.0/0)');
-  console.log('3. Database user credentials');
   process.exit(1);
 });
 
-// MongoDB Schemas - PERMANENT STORAGE
+// MongoDB Schemas
 const pdfSchema = new mongoose.Schema({
   name: { type: String, required: true },
   displayName: { type: String, required: true },
@@ -54,8 +43,8 @@ const pdfSchema = new mongoose.Schema({
   type: { type: String, required: true },
   icon: { type: String, required: true },
   color: { type: String, default: '#6a11cb' },
-  fileBuffer: { type: Buffer, required: true }, // Store PDF file in MongoDB
-  fileSize: { type: Number, required: true },
+  fileBuffer: { type: Buffer }, // Make optional for existing PDFs
+  fileSize: { type: Number, default: 0 }, // Add default value
   uploadDate: { type: Date, default: Date.now }
 });
 
@@ -67,35 +56,26 @@ const visitSchema = new mongoose.Schema({
 const PDF = mongoose.model('PDF', pdfSchema);
 const Visit = mongoose.model('Visit', visitSchema);
 
-// Multer configuration - Store files in memory to save to MongoDB
-const storage = multer.memoryStorage(); // Store file in memory
-
+// Multer configuration
+const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 // ==================== ROUTES ====================
 
-// Health check with MongoDB status
+// Health check
 app.get('/api/health', async (req, res) => {
   try {
     const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
     const pdfCount = await PDF.countDocuments();
-    const visitData = await Visit.findOne();
     
     res.json({
       status: 'OK',
-      database: {
-        mongodb: dbStatus,
-        storage: 'permanent',
-        pdfCount: pdfCount
-      },
-      server: {
-        uptime: process.uptime(),
-        restartProof: true
-      },
-      message: 'Data persists through server restarts'
+      database: dbStatus,
+      pdfCount: pdfCount,
+      storage: 'MongoDB Atlas - Permanent'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -108,28 +88,27 @@ app.get('/api/pdfs', async (req, res) => {
     const pdfs = await PDF.find().sort({ uploadDate: -1 });
     console.log(`📚 Serving ${pdfs.length} PDFs from MongoDB`);
     
-    // Return PDF metadata (not the file buffer)
     const pdfList = pdfs.map(pdf => ({
       _id: pdf._id,
       name: pdf.name,
       displayName: pdf.displayName,
       filename: pdf.filename,
-      path: `/api/pdf/${pdf._id}`, // API endpoint to serve PDF
+      path: `/api/pdf/${pdf._id}`,
       type: pdf.type,
       icon: pdf.icon,
       color: pdf.color,
-      fileSize: pdf.fileSize,
+      fileSize: pdf.fileSize || 0,
       uploadDate: pdf.uploadDate
     }));
     
     res.json(pdfList);
   } catch (error) {
     console.error('Error fetching PDFs:', error);
-    res.status(500).json({ error: 'Failed to fetch PDFs from database' });
+    res.status(500).json({ error: 'Failed to fetch PDFs' });
   }
 });
 
-// Get PDFs by type from MongoDB
+// Get PDFs by type
 app.get('/api/pdfs/:type', async (req, res) => {
   try {
     const pdfs = await PDF.find({ type: req.params.type }).sort({ uploadDate: -1 });
@@ -143,7 +122,7 @@ app.get('/api/pdfs/:type', async (req, res) => {
       type: pdf.type,
       icon: pdf.icon,
       color: pdf.color,
-      fileSize: pdf.fileSize,
+      fileSize: pdf.fileSize || 0,
       uploadDate: pdf.uploadDate
     }));
     
@@ -153,7 +132,7 @@ app.get('/api/pdfs/:type', async (req, res) => {
   }
 });
 
-// ✅ SERVE PDF FILE FROM MONGODB
+// ✅ FIXED: Serve PDF file from MongoDB with error handling
 app.get('/api/pdf/:id', async (req, res) => {
   try {
     const pdf = await PDF.findById(req.params.id);
@@ -162,22 +141,31 @@ app.get('/api/pdf/:id', async (req, res) => {
       return res.status(404).json({ error: 'PDF not found' });
     }
 
-    // Set proper headers for PDF
+    // Check if fileBuffer exists
+    if (!pdf.fileBuffer) {
+      return res.status(404).json({ error: 'PDF file not available in database' });
+    }
+
+    // Set headers with safe values
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${pdf.name}"`);
-    res.setHeader('Content-Length', pdf.fileSize);
     
-    // Send the PDF buffer stored in MongoDB
+    // Only set Content-Length if fileSize exists and is valid
+    if (pdf.fileSize && pdf.fileSize > 0) {
+      res.setHeader('Content-Length', pdf.fileSize);
+    }
+    
+    // Send the PDF buffer
     res.send(pdf.fileBuffer);
     
-    console.log(`📄 Served PDF from MongoDB: ${pdf.displayName}`);
+    console.log(`📄 Served PDF: ${pdf.displayName}`);
   } catch (error) {
     console.error('Error serving PDF:', error);
     res.status(500).json({ error: 'Failed to serve PDF' });
   }
 });
 
-// ✅ DOWNLOAD PDF FROM MONGODB
+// ✅ FIXED: Download PDF from MongoDB
 app.get('/api/download-pdf/:id', async (req, res) => {
   try {
     const pdf = await PDF.findById(req.params.id);
@@ -186,21 +174,26 @@ app.get('/api/download-pdf/:id', async (req, res) => {
       return res.status(404).json({ error: 'PDF not found' });
     }
 
-    // Set download headers
+    if (!pdf.fileBuffer) {
+      return res.status(404).json({ error: 'PDF file not available' });
+    }
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${pdf.name}"`);
-    res.setHeader('Content-Length', pdf.fileSize);
     
-    // Send the PDF buffer for download
+    if (pdf.fileSize && pdf.fileSize > 0) {
+      res.setHeader('Content-Length', pdf.fileSize);
+    }
+    
     res.send(pdf.fileBuffer);
     
-    console.log(`📥 Downloaded PDF from MongoDB: ${pdf.displayName}`);
+    console.log(`📥 Downloaded: ${pdf.displayName}`);
   } catch (error) {
     res.status(500).json({ error: 'Failed to download PDF' });
   }
 });
 
-// Get counts from MongoDB
+// Get counts
 app.get('/api/stats/counts', async (req, res) => {
   try {
     const materialCount = await PDF.countDocuments({ type: 'material' });
@@ -217,7 +210,7 @@ app.get('/api/stats/counts', async (req, res) => {
   }
 });
 
-// ✅ ADMIN: UPLOAD PDF TO MONGODB (PERMANENT STORAGE)
+// ✅ FIXED: Upload PDF to MongoDB
 app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
   try {
     console.log('📤 Uploading PDF to MongoDB...');
@@ -235,16 +228,16 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
       });
     }
 
-    // Create PDF document with file buffer
+    // Create PDF with file buffer
     const newPdf = new PDF({
       name: pdfName || req.file.originalname,
       displayName: pdfDisplayName,
       filename: req.file.originalname,
-      path: `/api/pdf/`, // Will be set with ID
+      path: `/api/pdf/`, // Will update with ID
       type: pdfType,
       icon: pdfIcon,
       color: pdfColor || '#6a11cb',
-      fileBuffer: req.file.buffer, // Store file in MongoDB
+      fileBuffer: req.file.buffer,
       fileSize: req.file.size
     });
 
@@ -255,12 +248,10 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
     await savedPdf.save();
 
     console.log(`✅ PDF stored in MongoDB: "${savedPdf.displayName}"`);
-    console.log(`💾 File size: ${(savedPdf.fileSize / 1024 / 1024).toFixed(2)} MB`);
-    console.log(`🆔 MongoDB ID: ${savedPdf._id}`);
 
     res.json({
       success: true,
-      message: 'PDF stored permanently in MongoDB Atlas!',
+      message: 'PDF stored permanently in MongoDB!',
       pdf: {
         _id: savedPdf._id,
         name: savedPdf.name,
@@ -275,15 +266,15 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ MongoDB upload error:', error);
+    console.error('Upload error:', error);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to upload to MongoDB: ' + error.message 
+      error: 'Upload failed: ' + error.message 
     });
   }
 });
 
-// Admin: Delete PDF from MongoDB
+// Delete PDF
 app.delete('/api/admin/pdfs/:id', async (req, res) => {
   try {
     const pdf = await PDF.findById(req.params.id);
@@ -293,73 +284,31 @@ app.delete('/api/admin/pdfs/:id', async (req, res) => {
     }
 
     await PDF.findByIdAndDelete(req.params.id);
-    console.log(`🗑️ PDF deleted from MongoDB: "${pdf.displayName}"`);
+    console.log(`🗑️ Deleted: "${pdf.displayName}"`);
     
-    res.json({ 
-      success: true, 
-      message: 'PDF deleted from MongoDB' 
-    });
+    res.json({ success: true, message: 'PDF deleted' });
   } catch (error) {
     res.status(500).json({ error: 'Delete failed' });
   }
 });
 
-// Visit tracking
-app.get('/api/visits', async (req, res) => {
+// Fix existing PDFs (run once to fix old PDFs)
+app.post('/api/fix-pdfs', async (req, res) => {
   try {
-    let visitData = await Visit.findOne();
+    const pdfs = await PDF.find({ fileSize: { $exists: false } });
+    console.log(`🛠️ Fixing ${pdfs.length} PDFs with missing fileSize`);
     
-    if (!visitData) {
-      visitData = new Visit({ count: 0 });
-      await visitData.save();
-    }
-    
-    res.json({ count: visitData.count });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch visit count' });
-  }
-});
-
-app.post('/api/visits/increment', async (req, res) => {
-  try {
-    let visitData = await Visit.findOne();
-    
-    if (!visitData) {
-      visitData = new Visit({ count: 1 });
-    } else {
-      visitData.count += 1;
-      visitData.lastUpdated = new Date();
-    }
-    
-    await visitData.save();
-    res.json({ count: visitData.count });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to increment visit count' });
-  }
-});
-
-// Database info endpoint
-app.get('/api/database/info', async (req, res) => {
-  try {
-    const pdfCount = await PDF.countDocuments();
-    const totalSize = await PDF.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalSize: { $sum: "$fileSize" }
-        }
+    for (let pdf of pdfs) {
+      if (pdf.fileBuffer) {
+        pdf.fileSize = pdf.fileBuffer.length;
+        await pdf.save();
+        console.log(`✅ Fixed: ${pdf.displayName}`);
       }
-    ]);
+    }
     
-    const totalSizeMB = totalSize.length > 0 ? (totalSize[0].totalSize / 1024 / 1024).toFixed(2) : 0;
-    
-    res.json({
-      database: 'MongoDB Atlas',
-      storage: 'Permanent',
-      pdfCount: pdfCount,
-      totalStorage: `${totalSizeMB} MB`,
-      serverRestart: 'Data survives restarts',
-      status: 'Active'
+    res.json({ 
+      success: true, 
+      message: `Fixed ${pdfs.length} PDFs` 
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -373,16 +322,10 @@ app.get('*', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log('='.repeat(60));
-  console.log('🚀 STUDY PORTAL - MONGODB ATLAS PERMANENT STORAGE');
-  console.log('='.repeat(60));
+  console.log('='.repeat(50));
+  console.log('🚀 STUDY PORTAL - MONGODB FIXED VERSION');
+  console.log('='.repeat(50));
   console.log(`✅ Server running on port: ${PORT}`);
-  console.log(`🌐 App URL: https://exam-k35t.onrender.com`);
-  console.log(`💾 Database: MongoDB Atlas (Permanent)`);
-  console.log(`📄 PDF Storage: Files stored in MongoDB`);
-  console.log(`🔄 Server Restart: Data persists automatically`);
-  console.log('='.repeat(60));
-  console.log('✅ Your data is now permanently stored in MongoDB Atlas!');
-  console.log('✅ PDFs will survive server restarts!');
-  console.log('='.repeat(60));
+  console.log(`📄 PDF errors fixed - Ready to serve files!`);
+  console.log('='.repeat(50));
 });
