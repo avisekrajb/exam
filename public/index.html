@@ -1454,7 +1454,7 @@
     </footer>
 
     <script>
-     // Security: Disable right-click and text selection
+   // Security: Disable right-click and text selection
 document.addEventListener('contextmenu', function(e) {
     e.preventDefault();
     showToast("Right-click is disabled");
@@ -1504,10 +1504,6 @@ function showToast(message, isError = false) {
         toast.style.display = 'none';
     }, 3000);
 }
-
-// Global variables to store current PDFs from MongoDB
-let currentMaterialPDFs = [];
-let currentImpPDFs = [];
 
 // DOM elements
 const welcomePopup = document.getElementById('welcomePopup');
@@ -1565,6 +1561,10 @@ let impPdfsVisible = 6;
 let isAdminLoggedIn = false;
 let websiteVisits = localStorage.getItem('websiteVisits') ? parseInt(localStorage.getItem('websiteVisits')) : 0;
 
+// Global variables to store current PDFs from MongoDB
+let currentMaterialPDFs = [];
+let currentImpPDFs = [];
+
 // ==================== DATABASE FUNCTIONS ====================
 
 // Function to load PDFs from MongoDB
@@ -1572,26 +1572,23 @@ async function loadPDFsFromDatabase() {
     try {
         console.log('🔄 Loading PDFs from MongoDB...');
         
-        // Load study materials
-        const materialResponse = await fetch('/api/pdfs/material');
-        if (!materialResponse.ok) throw new Error('Failed to fetch materials');
-        currentMaterialPDFs = await materialResponse.json();
+        // Load all PDFs
+        const response = await fetch('/api/pdfs');
+        if (!response.ok) throw new Error('Failed to fetch PDFs');
+        const allPDFs = await response.json();
         
-        // Load important questions  
-        const impResponse = await fetch('/api/pdfs/imp-material');
-        if (!impResponse.ok) throw new Error('Failed to fetch important questions');
-        currentImpPDFs = await impResponse.json();
+        // Separate by type
+        currentMaterialPDFs = allPDFs.filter(pdf => pdf.type === 'material');
+        currentImpPDFs = allPDFs.filter(pdf => pdf.type === 'imp-material');
         
         console.log(`📚 Loaded ${currentMaterialPDFs.length} materials, ${currentImpPDFs.length} important PDFs`);
         
-        // Update the UI with real data
         updatePDFsDisplay(currentMaterialPDFs, currentImpPDFs);
         updateStatsCounts();
         
     } catch (error) {
-        console.error('Error loading PDFs from MongoDB:', error);
-        showToast("Failed to load PDFs. Please refresh the page.", true);
-        // Fallback to empty arrays
+        console.error('Error loading PDFs:', error);
+        showToast("Failed to load PDFs from database", true);
         currentMaterialPDFs = [];
         currentImpPDFs = [];
     }
@@ -1608,13 +1605,13 @@ async function updateStatsCounts() {
         totalImpQuestions.textContent = counts.impMaterialCount;
         totalImages.textContent = 0;
         
-        console.log(`📊 Updated stats: ${counts.materialCount} materials, ${counts.impMaterialCount} important`);
+        console.log(`📊 MongoDB Stats: ${counts.materialCount} materials, ${counts.impMaterialCount} important`);
+        
     } catch (error) {
         console.error('Error updating stats:', error);
         // Fallback to local counts
         totalPdfs.textContent = currentMaterialPDFs.length;
         totalImpQuestions.textContent = currentImpPDFs.length;
-        totalImages.textContent = 0;
     }
 }
 
@@ -1636,178 +1633,9 @@ function updatePDFsDisplay(materialPDFs, impPDFs) {
     
     // Update view more buttons
     updateViewMoreButtons();
-    
-    // Show no results if no PDFs
-    if (materialPDFs.length === 0 && impPDFs.length === 0) {
-        noResults.style.display = 'block';
-    } else {
-        noResults.style.display = 'none';
-    }
 }
 
-// ==================== ADMIN FUNCTIONS ====================
-
-// Admin login
-adminLoginBtn.addEventListener('click', function() {
-    const email = adminEmail.value;
-    const password = adminPassword.value;
-    
-    if (email === 'a@gmail.com' && password === '12345') {
-        isAdminLoggedIn = true;
-        adminLoginPopup.style.display = 'none';
-        adminPanel.style.display = 'block';
-        document.querySelector('.container').style.display = 'none';
-        document.querySelector('footer').style.display = 'none';
-        showToast("Admin login successful");
-        updateAdminStats();
-        renderPdfTable();
-    } else {
-        adminLoginError.textContent = "Invalid email or password";
-        adminLoginError.style.display = 'block';
-    }
-});
-
-// Close admin panel
-adminClose.addEventListener('click', function() {
-    adminPanel.style.display = 'none';
-    document.querySelector('.container').style.display = 'block';
-    document.querySelector('footer').style.display = 'block';
-    isAdminLoggedIn = false;
-});
-
-// Update admin stats
-function updateAdminStats() {
-    adminTotalVisits.textContent = websiteVisits;
-    adminTotalPdfs.textContent = currentMaterialPDFs.length;
-    adminTotalImpQuestions.textContent = currentImpPDFs.length;
-}
-
-// Render PDF table in admin panel
-async function renderPdfTable() {
-    try {
-        const response = await fetch('/api/pdfs');
-        if (!response.ok) throw new Error('Failed to fetch PDFs for admin');
-        const allPdfs = await response.json();
-        
-        pdfTableBody.innerHTML = '';
-        
-        allPdfs.forEach(pdf => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${pdf.displayName}</td>
-                <td>${pdf.type === 'material' ? 'Study Material' : 'Important Question'}</td>
-                <td>${new Date(pdf.dateAdded).toLocaleDateString()}</td>
-                <td>
-                    <button class="action-btn action-delete" data-id="${pdf._id}">
-                        <i class="fas fa-trash"></i> Delete
-                    </button>
-                </td>
-            `;
-            pdfTableBody.appendChild(row);
-        });
-        
-        // Add event listeners for delete buttons
-        document.querySelectorAll('.action-delete').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const id = this.getAttribute('data-id');
-                deletePdf(id);
-            });
-        });
-    } catch (error) {
-        console.error('Error rendering PDF table:', error);
-        pdfTableBody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #666;">Failed to load PDFs</td></tr>';
-    }
-}
-
-// Delete PDF from MongoDB
-async function deletePdf(id) {
-    if (confirm("Are you sure you want to delete this PDF?")) {
-        try {
-            const response = await fetch(`/api/admin/pdfs/${id}`, {
-                method: 'DELETE'
-            });
-            
-            if (response.ok) {
-                // Reload PDFs from database
-                await loadPDFsFromDatabase();
-                renderPdfTable();
-                updateAdminStats();
-                
-                showToast("PDF deleted successfully");
-            } else {
-                const error = await response.json();
-                showToast(error.error || "Failed to delete PDF", true);
-            }
-        } catch (error) {
-            console.error('Error deleting PDF:', error);
-            showToast("Failed to delete PDF", true);
-        }
-    }
-}
-
-// Admin PDF Upload
-addPdfForm.addEventListener('submit', async function(e) {
-    e.preventDefault();
-    
-    const pdfName = document.getElementById('pdfName').value;
-    const pdfDisplayName = document.getElementById('pdfDisplayName').value;
-    const pdfType = document.getElementById('pdfType').value;
-    const pdfIcon = document.getElementById('pdfIcon').value;
-    const pdfColor = document.getElementById('pdfColor').value;
-    const pdfFile = document.getElementById('pdfFile').files[0];
-    
-    if (!pdfFile) {
-        showToast("Please select a PDF file", true);
-        return;
-    }
-    
-    // Create form data for file upload
-    const formData = new FormData();
-    formData.append('pdfFile', pdfFile);
-    formData.append('pdfName', pdfName);
-    formData.append('pdfDisplayName', pdfDisplayName);
-    formData.append('pdfType', pdfType);
-    formData.append('pdfIcon', pdfIcon);
-    formData.append('pdfColor', pdfColor);
-
-    // Show loading
-    const submitBtn = addPdfForm.querySelector('.form-submit');
-    const originalText = submitBtn.innerHTML;
-    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
-    submitBtn.disabled = true;
-
-    try {
-        const response = await fetch('/api/admin/pdfs', {
-            method: 'POST',
-            body: formData
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok && result.success) {
-            // Reset form
-            addPdfForm.reset();
-            
-            // Reload PDFs from database
-            await loadPDFsFromDatabase();
-            renderPdfTable();
-            updateAdminStats();
-            
-            showToast("PDF added successfully!");
-        } else {
-            showToast(result.error || "Failed to add PDF", true);
-        }
-    } catch (error) {
-        console.error('Error adding PDF:', error);
-        showToast("Failed to add PDF: " + error.message, true);
-    } finally {
-        // Reset button
-        submitBtn.innerHTML = originalText;
-        submitBtn.disabled = false;
-    }
-});
-
-// ==================== UI RENDERING FUNCTIONS ====================
+// ==================== PDF RENDERING ====================
 
 // Function to render PDF cards
 function renderPDFCards(pdfs, container, isMini = false) {
@@ -1886,24 +1714,9 @@ function adjustColor(color, percent) {
         (B < 255 ? B < 1 ? 0 : B : 255)).toString(16).slice(1);
 }
 
-// Update view more buttons based on data
-function updateViewMoreButtons() {
-    if (currentMaterialPDFs.length <= 6) {
-        viewMorePdfsBtn.style.display = 'none';
-    } else {
-        viewMorePdfsBtn.style.display = 'block';
-    }
-    
-    if (currentImpPDFs.length <= 6) {
-        viewMoreImpPdfsBtn.style.display = 'none';
-    } else {
-        viewMoreImpPdfsBtn.style.display = 'block';
-    }
-}
+// ==================== PDF VIEWER & DOWNLOAD ====================
 
-// ==================== PDF VIEWER & DOWNLOAD FUNCTIONS ====================
-
-// Function to open PDF viewer
+// Function to open PDF viewer from MongoDB
 function openPDFViewer(pdfId, type) {
     let pdf;
     if (type === 'material') {
@@ -1914,13 +1727,13 @@ function openPDFViewer(pdfId, type) {
     
     if (pdf) {
         pdfViewerTitle.textContent = pdf.displayName;
-        // Serve PDF from server
+        // Load PDF from server
         pdfFrame.src = pdf.path;
         pdfViewerContainer.style.display = 'block';
     }
 }
 
-// Function to download PDF
+// Function to download PDF from MongoDB
 function downloadPDF(pdfId, type) {
     let pdf;
     if (type === 'material') {
@@ -1930,7 +1743,7 @@ function downloadPDF(pdfId, type) {
     }
     
     if (pdf) {
-        // Create download link to server file
+        // Download from server
         const link = document.createElement('a');
         link.href = pdf.path;
         link.download = pdf.name || pdf.displayName + '.pdf';
@@ -1945,12 +1758,6 @@ function downloadPDF(pdfId, type) {
 
 // Function to filter items based on search
 function filterItems(searchTerm) {
-    if (!searchTerm) {
-        // If search is empty, show all PDFs
-        updatePDFsDisplay(currentMaterialPDFs, currentImpPDFs);
-        return;
-    }
-    
     const filteredMaterials = currentMaterialPDFs.filter(pdf => 
         pdf.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
         pdf.displayName.toLowerCase().includes(searchTerm.toLowerCase())
@@ -1974,19 +1781,143 @@ function filterItems(searchTerm) {
     }
 }
 
+// ==================== ADMIN FUNCTIONS ====================
+
+// Admin PDF Upload to MongoDB
+addPdfForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const pdfName = document.getElementById('pdfName').value;
+    const pdfDisplayName = document.getElementById('pdfDisplayName').value;
+    const pdfType = document.getElementById('pdfType').value;
+    const pdfIcon = document.getElementById('pdfIcon').value;
+    const pdfColor = document.getElementById('pdfColor').value;
+    const pdfFile = document.getElementById('pdfFile').files[0];
+    
+    if (!pdfFile) {
+        showToast("Please select a PDF file", true);
+        return;
+    }
+    
+    // Create form data
+    const formData = new FormData();
+    formData.append('pdfFile', pdfFile);
+    formData.append('pdfName', pdfName);
+    formData.append('pdfDisplayName', pdfDisplayName);
+    formData.append('pdfType', pdfType);
+    formData.append('pdfIcon', pdfIcon);
+    formData.append('pdfColor', pdfColor);
+
+    // Show loading
+    const submitBtn = addPdfForm.querySelector('.form-submit');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+    submitBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/admin/pdfs', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok && result.success) {
+            addPdfForm.reset();
+            await loadPDFsFromDatabase();
+            renderPdfTable();
+            updateAdminStats();
+            showToast("PDF uploaded successfully to MongoDB!");
+        } else {
+            showToast(result.error || "Upload failed", true);
+        }
+    } catch (error) {
+        console.error('Upload error:', error);
+        showToast("Upload failed: " + error.message, true);
+    } finally {
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
+    }
+});
+
+// Render PDF table in admin panel
+async function renderPdfTable() {
+    try {
+        const response = await fetch('/api/pdfs');
+        const allPdfs = await response.json();
+        
+        pdfTableBody.innerHTML = '';
+        
+        allPdfs.forEach(pdf => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${pdf.displayName}</td>
+                <td>${pdf.type === 'material' ? 'Study Material' : 'Important Question'}</td>
+                <td>${new Date(pdf.dateAdded).toLocaleDateString()}</td>
+                <td>
+                    <button class="action-btn action-delete" data-id="${pdf._id}">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </td>
+            `;
+            pdfTableBody.appendChild(row);
+        });
+        
+        // Add event listeners for delete buttons
+        document.querySelectorAll('.action-delete').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const id = this.getAttribute('data-id');
+                deletePdf(id);
+            });
+        });
+    } catch (error) {
+        console.error('Error rendering PDF table:', error);
+    }
+}
+
+// Delete PDF from MongoDB
+async function deletePdf(id) {
+    if (confirm("Are you sure you want to delete this PDF?")) {
+        try {
+            const response = await fetch(`/api/admin/pdfs/${id}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                // Reload PDFs from database
+                await loadPDFsFromDatabase();
+                renderPdfTable();
+                updateAdminStats();
+                
+                showToast("PDF deleted successfully from MongoDB");
+            } else {
+                showToast("Failed to delete PDF", true);
+            }
+        } catch (error) {
+            console.error('Error deleting PDF:', error);
+            showToast("Failed to delete PDF", true);
+        }
+    }
+}
+
+// Update admin stats
+function updateAdminStats() {
+    adminTotalVisits.textContent = websiteVisits;
+    adminTotalPdfs.textContent = currentMaterialPDFs.length;
+    adminTotalImpQuestions.textContent = currentImpPDFs.length;
+}
+
 // ==================== EVENT LISTENERS ====================
 
 // Remove auto-show of admin login popup
 window.addEventListener('load', function() {
-    // Show welcome popup but NOT admin login
     welcomePopup.style.display = 'flex';
     adminLoginPopup.style.display = 'none';
     
-    // Load real data from MongoDB
+    // Load data from MongoDB
     loadPDFsFromDatabase();
     updateStatsCounts();
     
-    // Increment website visits
     websiteVisits++;
     localStorage.setItem('websiteVisits', websiteVisits);
     updateAdminStats();
@@ -2012,11 +1943,39 @@ adminLoginPopup.addEventListener('click', function(e) {
     }
 });
 
-// Escape key to close admin login
+// Also add escape key to close admin login
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape' && adminLoginPopup.style.display === 'flex') {
         adminLoginPopup.style.display = 'none';
     }
+});
+
+// Admin login
+adminLoginBtn.addEventListener('click', function() {
+    const email = adminEmail.value;
+    const password = adminPassword.value;
+    
+    if (email === 'a@gmail.com' && password === '12345') {
+        isAdminLoggedIn = true;
+        adminLoginPopup.style.display = 'none';
+        adminPanel.style.display = 'block';
+        document.querySelector('.container').style.display = 'none';
+        document.querySelector('footer').style.display = 'none';
+        showToast("Admin login successful");
+        updateAdminStats();
+        renderPdfTable();
+    } else {
+        adminLoginError.textContent = "Invalid email or password";
+        adminLoginError.style.display = 'block';
+    }
+});
+
+// Close admin panel
+adminClose.addEventListener('click', function() {
+    adminPanel.style.display = 'none';
+    document.querySelector('.container').style.display = 'block';
+    document.querySelector('footer').style.display = 'block';
+    isAdminLoggedIn = false;
 });
 
 // Event listeners for buttons
@@ -2025,6 +1984,7 @@ document.addEventListener('click', function(e) {
         const btn = e.target.classList.contains('btn-view') ? e.target : e.target.parentElement;
         const id = btn.getAttribute('data-id');
         const type = btn.getAttribute('data-type');
+        
         openPDFViewer(id, type);
     }
     
@@ -2032,6 +1992,7 @@ document.addEventListener('click', function(e) {
         const btn = e.target.classList.contains('btn-download') ? e.target : e.target.parentElement;
         const id = btn.getAttribute('data-id');
         const type = btn.getAttribute('data-type');
+        
         downloadPDF(id, type);
     }
 });
@@ -2067,6 +2028,21 @@ imageViewerContainer.addEventListener('click', function(e) {
     }
 });
 
+// Update view more buttons based on data
+function updateViewMoreButtons() {
+    if (currentMaterialPDFs.length <= 6) {
+        viewMorePdfsBtn.style.display = 'none';
+    } else {
+        viewMorePdfsBtn.style.display = 'block';
+    }
+    
+    if (currentImpPDFs.length <= 6) {
+        viewMoreImpPdfsBtn.style.display = 'none';
+    } else {
+        viewMoreImpPdfsBtn.style.display = 'block';
+    }
+}
+
 // View More/Less functionality
 viewMorePdfsBtn.addEventListener('click', function() {
     if (pdfsVisible === 6) {
@@ -2088,21 +2064,6 @@ viewMoreImpPdfsBtn.addEventListener('click', function() {
         viewMoreImpPdfsBtn.textContent = 'View More';
     }
     renderPDFCards(currentImpPDFs, impPdfMiniView, true);
-});
-
-// Mobile routine handling
-routineImage.addEventListener('click', function() {
-    if (window.innerWidth <= 768) {
-        mobileRoutinePopup.style.display = 'flex';
-    } else {
-        imageViewerTitle.textContent = "Semester Routine 2023";
-        fullImage.src = this.src;
-        imageViewerContainer.style.display = 'block';
-    }
-});
-
-mobileRoutineClose.addEventListener('click', function() {
-    mobileRoutinePopup.style.display = 'none';
 });
 
 // Theme toggle
@@ -2148,6 +2109,28 @@ quickRoutine.addEventListener('click', function() {
     fab.innerHTML = '<i class="fas fa-plus"></i>';
 });
 
+// Mobile routine handling
+routineImage.addEventListener('click', function() {
+    if (window.innerWidth <= 768) {
+        mobileRoutinePopup.style.display = 'flex';
+    } else {
+        imageViewerTitle.textContent = "Semester Routine 2023";
+        fullImage.src = this.src;
+        imageViewerContainer.style.display = 'block';
+    }
+});
+
+mobileRoutineClose.addEventListener('click', function() {
+    mobileRoutinePopup.style.display = 'none';
+});
+
+// Update progress (simulated)
+function updateProgress() {
+    const progress = Math.min(75, Math.floor((currentMaterialPDFs.length + currentImpPDFs.length) / 20 * 100));
+    progressFill.style.width = `${progress}%`;
+    progressPercent.textContent = `${progress}%`;
+}
+
 // Download routine
 downloadRoutine.addEventListener('click', function() {
     const link = document.createElement('a');
@@ -2159,15 +2142,7 @@ downloadRoutine.addEventListener('click', function() {
     showToast("Semester routine downloaded successfully");
 });
 
-// Update progress (simulated)
-function updateProgress() {
-    const progress = Math.min(75, Math.floor((currentMaterialPDFs.length + currentImpPDFs.length) / 20 * 100));
-    progressFill.style.width = `${progress}%`;
-    progressPercent.textContent = `${progress}%`;
-}
-
-// Initialize progress bar
-setInterval(updateProgress, 2000);
+// Initial render will be handled by loadPDFsFromDatabase()
     </script>
 </body>
 </html>
