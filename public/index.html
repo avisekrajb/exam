@@ -1889,7 +1889,78 @@ async function renderPdfTable() {
         console.error('Error rendering PDF table:', error);
     }
 }
+// Check PDF status and fix if needed
+async function checkAndFixPDF(pdfId) {
+    try {
+        const response = await fetch(`/api/pdf-status/${pdfId}`);
+        const status = await response.json();
+        
+        console.log('📊 PDF Status:', status);
+        
+        if (!status.hasFileBuffer) {
+            showToast('PDF file content missing. Please re-upload this PDF.', true);
+            return false;
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Error checking PDF status:', error);
+        return false;
+    }
+}
 
+// Updated PDF viewing function
+async function openPDFViewer(pdfId, type) {
+    // Check if PDF has file content
+    const hasContent = await checkAndFixPDF(pdfId);
+    
+    if (!hasContent) {
+        return;
+    }
+    
+    let pdf;
+    if (type === 'material') {
+        pdf = currentMaterialPDFs.find(p => p._id == pdfId);
+    } else {
+        pdf = currentImpPDFs.find(p => p._id == pdfId);
+    }
+    
+    if (pdf) {
+        pdfViewerTitle.textContent = pdf.displayName;
+        
+        // Load PDF from MongoDB API
+        pdfFrame.src = `/api/pdf/${pdf._id}`;
+        pdfViewerContainer.style.display = 'block';
+    }
+}
+
+// Updated download function
+async function downloadPDF(pdfId, type) {
+    // Check if PDF has file content
+    const hasContent = await checkAndFixPDF(pdfId);
+    
+    if (!hasContent) {
+        return;
+    }
+    
+    let pdf;
+    if (type === 'material') {
+        pdf = currentMaterialPDFs.find(p => p._id == pdfId);
+    } else {
+        pdf = currentImpPDFs.find(p => p._id == pdfId);
+    }
+    
+    if (pdf) {
+        // Download from MongoDB API
+        const link = document.createElement('a');
+        link.href = `/api/download-pdf/${pdf._id}`;
+        link.download = pdf.name || pdf.displayName + '.pdf';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast(`${pdf.displayName} downloaded successfully`);
+    }
+}
 // Delete PDF from MongoDB
 async function deletePdf(id) {
     if (confirm("Are you sure you want to delete this PDF?")) {
