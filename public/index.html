@@ -1717,6 +1717,7 @@ function adjustColor(color, percent) {
 // ==================== PDF VIEWER & DOWNLOAD ====================
 
 // Function to open PDF viewer from MongoDB
+// Function to open PDF viewer - FIXED VERSION
 function openPDFViewer(pdfId, type) {
     let pdf;
     if (type === 'material') {
@@ -1727,12 +1728,26 @@ function openPDFViewer(pdfId, type) {
     
     if (pdf) {
         pdfViewerTitle.textContent = pdf.displayName;
-        // Load PDF from server
-        pdfFrame.src = pdf.path;
+        
+        // ✅ FIX: Use the correct PDF path from MongoDB
+        const pdfUrl = pdf.path; // This should be like "/uploads/filename.pdf"
+        console.log('📄 Opening PDF:', pdfUrl);
+        
+        // Set the PDF frame source
+        pdfFrame.src = pdfUrl;
         pdfViewerContainer.style.display = 'block';
+        
+        // Add error handling for PDF loading
+        pdfFrame.onload = function() {
+            console.log('✅ PDF loaded successfully');
+        };
+        
+        pdfFrame.onerror = function() {
+            console.error('❌ Failed to load PDF');
+            showToast("Failed to load PDF", true);
+        };
     }
 }
-
 // Function to download PDF from MongoDB
 function downloadPDF(pdfId, type) {
     let pdf;
