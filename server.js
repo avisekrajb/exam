@@ -23,11 +23,9 @@ if (!MONGODB_URI) {
 
 console.log('🔗 Connecting to MongoDB Atlas...');
 
-// Updated MongoDB connection (removed deprecated options)
 mongoose.connect(MONGODB_URI)
 .then(() => {
   console.log('✅ Connected to MongoDB Atlas successfully');
-  console.log('💾 Database: Permanent storage enabled');
 })
 .catch(err => {
   console.error('❌ MongoDB connection failed:', err.message);
@@ -43,20 +41,14 @@ const pdfSchema = new mongoose.Schema({
   type: { type: String, required: true },
   icon: { type: String, required: true },
   color: { type: String, default: '#6a11cb' },
-  fileBuffer: { type: Buffer }, // Make optional for existing PDFs
-  fileSize: { type: Number, default: 0 }, // Add default value
+  fileBuffer: { type: Buffer }, // Store PDF file content
+  fileSize: { type: Number, default: 0 },
   uploadDate: { type: Date, default: Date.now }
 });
 
-const visitSchema = new mongoose.Schema({
-  count: { type: Number, default: 0 },
-  lastUpdated: { type: Date, default: Date.now }
-});
-
 const PDF = mongoose.model('PDF', pdfSchema);
-const Visit = mongoose.model('Visit', visitSchema);
 
-// Multer configuration
+// Multer configuration - Store files in memory
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
@@ -74,8 +66,7 @@ app.get('/api/health', async (req, res) => {
     res.json({
       status: 'OK',
       database: dbStatus,
-      pdfCount: pdfCount,
-      storage: 'MongoDB Atlas - Permanent'
+      pdfCount: pdfCount
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -97,8 +88,9 @@ app.get('/api/pdfs', async (req, res) => {
       type: pdf.type,
       icon: pdf.icon,
       color: pdf.color,
-      fileSize: pdf.fileSize || 0,
-      uploadDate: pdf.uploadDate
+      fileSize: pdf.fileSize,
+      uploadDate: pdf.uploadDate,
+      hasFile: !!pdf.fileBuffer // Check if file content exists
     }));
     
     res.json(pdfList);
@@ -122,8 +114,9 @@ app.get('/api/pdfs/:type', async (req, res) => {
       type: pdf.type,
       icon: pdf.icon,
       color: pdf.color,
-      fileSize: pdf.fileSize || 0,
-      uploadDate: pdf.uploadDate
+      fileSize: pdf.fileSize,
+      uploadDate: pdf.uploadDate,
+      hasFile: !!pdf.fileBuffer
     }));
     
     res.json(pdfList);
@@ -132,7 +125,7 @@ app.get('/api/pdfs/:type', async (req, res) => {
   }
 });
 
-// ✅ FIXED: Serve PDF file from MongoDB with error handling
+// ✅ SERVE PDF FILE - FIXED VERSION
 app.get('/api/pdf/:id', async (req, res) => {
   try {
     const pdf = await PDF.findById(req.params.id);
@@ -143,29 +136,27 @@ app.get('/api/pdf/:id', async (req, res) => {
 
     // Check if fileBuffer exists
     if (!pdf.fileBuffer) {
-      return res.status(404).json({ error: 'PDF file not available in database' });
+      console.log(`❌ PDF file content missing for: ${pdf.displayName}`);
+      return res.status(404).json({ 
+        error: 'PDF file content not available. Please re-upload the PDF.' 
+      });
     }
 
-    // Set headers with safe values
+    // Set proper headers for PDF
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${pdf.name}"`);
-    
-    // Only set Content-Length if fileSize exists and is valid
-    if (pdf.fileSize && pdf.fileSize > 0) {
-      res.setHeader('Content-Length', pdf.fileSize);
-    }
     
     // Send the PDF buffer
     res.send(pdf.fileBuffer);
     
-    console.log(`📄 Served PDF: ${pdf.displayName}`);
+    console.log(`📄 Served PDF: ${pdf.displayName} (${pdf.fileSize} bytes)`);
   } catch (error) {
     console.error('Error serving PDF:', error);
     res.status(500).json({ error: 'Failed to serve PDF' });
   }
 });
 
-// ✅ FIXED: Download PDF from MongoDB
+// ✅ DOWNLOAD PDF - FIXED VERSION
 app.get('/api/download-pdf/:id', async (req, res) => {
   try {
     const pdf = await PDF.findById(req.params.id);
@@ -175,16 +166,16 @@ app.get('/api/download-pdf/:id', async (req, res) => {
     }
 
     if (!pdf.fileBuffer) {
-      return res.status(404).json({ error: 'PDF file not available' });
+      return res.status(404).json({ 
+        error: 'PDF file content not available for download' 
+      });
     }
 
+    // Set download headers
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${pdf.name}"`);
     
-    if (pdf.fileSize && pdf.fileSize > 0) {
-      res.setHeader('Content-Length', pdf.fileSize);
-    }
-    
+    // Send the PDF buffer for download
     res.send(pdf.fileBuffer);
     
     console.log(`📥 Downloaded: ${pdf.displayName}`);
@@ -210,7 +201,7 @@ app.get('/api/stats/counts', async (req, res) => {
   }
 });
 
-// ✅ FIXED: Upload PDF to MongoDB
+// ✅ UPLOAD PDF - STORES FILE CONTENT IN MONGODB
 app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
   try {
     console.log('📤 Uploading PDF to MongoDB...');
@@ -228,7 +219,7 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
       });
     }
 
-    // Create PDF with file buffer
+    // Create PDF document with file buffer
     const newPdf = new PDF({
       name: pdfName || req.file.originalname,
       displayName: pdfDisplayName,
@@ -237,7 +228,7 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
       type: pdfType,
       icon: pdfIcon,
       color: pdfColor || '#6a11cb',
-      fileBuffer: req.file.buffer,
+      fileBuffer: req.file.buffer, // Store the actual file content
       fileSize: req.file.size
     });
 
@@ -248,10 +239,11 @@ app.post('/api/admin/pdfs', upload.single('pdfFile'), async (req, res) => {
     await savedPdf.save();
 
     console.log(`✅ PDF stored in MongoDB: "${savedPdf.displayName}"`);
+    console.log(`💾 File size: ${(savedPdf.fileSize / 1024 / 1024).toFixed(2)} MB`);
 
     res.json({
       success: true,
-      message: 'PDF stored permanently in MongoDB!',
+      message: 'PDF stored permanently in MongoDB Atlas!',
       pdf: {
         _id: savedPdf._id,
         name: savedPdf.name,
@@ -292,23 +284,50 @@ app.delete('/api/admin/pdfs/:id', async (req, res) => {
   }
 });
 
-// Fix existing PDFs (run once to fix old PDFs)
-app.post('/api/fix-pdfs', async (req, res) => {
+// ✅ FIX: Re-upload missing PDF files
+app.post('/api/admin/reupload-pdf/:id', upload.single('pdfFile'), async (req, res) => {
   try {
-    const pdfs = await PDF.find({ fileSize: { $exists: false } });
-    console.log(`🛠️ Fixing ${pdfs.length} PDFs with missing fileSize`);
+    const pdf = await PDF.findById(req.params.id);
     
-    for (let pdf of pdfs) {
-      if (pdf.fileBuffer) {
-        pdf.fileSize = pdf.fileBuffer.length;
-        await pdf.save();
-        console.log(`✅ Fixed: ${pdf.displayName}`);
-      }
+    if (!pdf) {
+      return res.status(404).json({ error: 'PDF not found' });
     }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Update PDF with new file buffer
+    pdf.fileBuffer = req.file.buffer;
+    pdf.fileSize = req.file.size;
+    await pdf.save();
+
+    console.log(`✅ Re-uploaded PDF content: ${pdf.displayName}`);
     
     res.json({ 
       success: true, 
-      message: `Fixed ${pdfs.length} PDFs` 
+      message: 'PDF file content updated successfully' 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Check PDF status
+app.get('/api/pdf-status/:id', async (req, res) => {
+  try {
+    const pdf = await PDF.findById(req.params.id);
+    
+    if (!pdf) {
+      return res.status(404).json({ error: 'PDF not found' });
+    }
+
+    res.json({
+      _id: pdf._id,
+      displayName: pdf.displayName,
+      hasFileBuffer: !!pdf.fileBuffer,
+      fileSize: pdf.fileSize,
+      status: pdf.fileBuffer ? 'Complete' : 'Missing File Content'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -323,9 +342,10 @@ app.get('*', (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log('='.repeat(50));
-  console.log('🚀 STUDY PORTAL - MONGODB FIXED VERSION');
+  console.log('🚀 STUDY PORTAL - MONGODB COMPLETE SOLUTION');
   console.log('='.repeat(50));
   console.log(`✅ Server running on port: ${PORT}`);
-  console.log(`📄 PDF errors fixed - Ready to serve files!`);
+  console.log(`📄 PDF files stored in MongoDB Atlas`);
+  console.log(`💾 Permanent storage - survives server restarts`);
   console.log('='.repeat(50));
 });
